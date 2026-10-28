@@ -334,12 +334,14 @@ async def test_write_tools_are_marked_not_read_only(server):
     read_tools = (
         "list_monitors",
         "get_monitor",
+        "get_monitor_data",
         "list_pages",
         "get_page",
         "list_incidents",
         "get_incident",
         "list_maintenances",
         "get_maintenance",
+        "list_all_maintenance_events",
         "get_site_config",
         "kener_docs",
         "get_config_overview",
@@ -353,6 +355,7 @@ async def test_write_tools_are_marked_not_read_only(server):
         "create_monitor",
         "create_page",
         "create_maintenance",
+        "upload_image",
     )
     for name in write_tools:
         assert tools[name].annotations.read_only_hint is False
@@ -362,6 +365,7 @@ async def test_write_tools_are_marked_not_read_only(server):
         "resolve_incident",
         "update_monitor",
         "pause_monitor",
+        "override_monitor_data",
         "update_page",
         "set_page_monitors",
         "update_incident",
@@ -1309,3 +1313,98 @@ async def test_delete_incident_comment_and_maintenance(server, api):
     maint_out = await call(server, "delete_maintenance", {"maintenance_id": 12})
     assert del_maint.called
     assert maint_out["deleted_maintenance_id"] == 12
+
+
+async def test_monitor_data_read_and_override(server, api):
+    pt = {
+        "monitor_tag": "web",
+        "timestamp": 1_760_000_040,
+        "status": "UP",
+        "latency": 42,
+        "type": "REALTIME",
+    }
+    api.get("/monitors/web/data/1760000040").respond(json={"data": pt})
+    single = await call(server, "get_monitor_data", {"tag": "web", "start_ts": 1_760_000_040})
+    assert single == {"data": [pt], "count": 1}
+
+    range_route = api.get("/monitors/web/data").respond(json={"data": [pt]})
+    ranged = await call(
+        server,
+        "get_monitor_data",
+        {"tag": "web", "start_ts": 1_760_000_040, "end_ts": 1_760_000_160},
+    )
+    assert range_route.calls.last.request.url.params["start_ts"] == "1760000040"
+    assert ranged["count"] == 1
+
+    # Single point override
+    patch_pt = api.patch("/monitors/web/data/1760000040").respond(
+        json={"data": {**pt, "status": "DOWN", "latency": 0, "type": "MANUAL"}}
+    )
+    ov_single = await call(
+        server,
+        "override_monitor_data",
+        {"tag": "web", "status": "DOWN", "start_ts": 1_760_000_040, "latency": 0},
+    )
+    assert sent_json(patch_pt) == {"status": "DOWN", "latency": 0}
+    assert ov_single["before"]["status"] == "UP"
+    assert ov_single["after"]["status"] == "DOWN"
+
+    # Range override
+    patch_range = api.patch("/monitors/web/data").respond(
+        json={"message": "Monitoring data updated successfully", "updated_count": 2}
+    )
+    ov_range = await call(
+        server,
+        "override_monitor_data",
+        {
+            "tag": "web",
+            "status": "UP",
+            "start_ts": 1_760_000_040,
+            "end_ts": 1_760_000_160,
+            "latency": 30,
+        },
+    )
+    assert sent_json(patch_range)["status"] == "UP"
+    assert ov_range["updated_count"] == 2
+
+
+async def test_list_all_maintenance_events_and_upload_image(server, api, tmp_path):
+    ev_route = api.get("/maintenances/events").respond(
+        json={
+            "events": [{"event_id": 101, "maintenance_id": 10, "event_status": "SCHEDULED"}],
+            "page": 1,
+            "limit": 20,
+            "total": 1,
+        }
+    )
+    ev_out = await call(
+        server,
+        "list_all_maintenance_events",
+        {"event_status": "SCHEDULED", "monitor_tags": ["web", "api"]},
+    )
+    assert ev_route.calls.last.request.url.params["event_status"] == "SCHEDULED"
+    assert ev_route.calls.last.request.url.params["monitors"] == "web,api"
+    assert ev_out["total"] == 1
+
+    img_file = tmp_path / "logo.png"
+    img_file.write_bytes(b"\x89PNG\r\n")
+    img_route = api.post("/images").respond(
+        201,
+        json={
+            "image": {
+                "id": "img_123",
+                "url": "/api/v4/images/img_123",
+                "mime_type": "image/png",
+            }
+        },
+    )
+    uploaded = await call(
+        server,
+        "upload_image",
+        {"mime_type": "image/png", "file_path": str(img_file), "max_width": 256},
+    )
+    sent = sent_json(img_route)
+    assert sent["file_name"] == "logo.png"
+    assert sent["mime_type"] == "image/png"
+    assert sent["max_width"] == 256
+    assert uploaded["id"] == "img_123"

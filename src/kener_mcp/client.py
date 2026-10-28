@@ -11,7 +11,9 @@ Impact = Literal["DOWN", "DEGRADED", "MAINTENANCE"]
 MaintenanceImpact = Literal["UP", "DOWN", "DEGRADED", "MAINTENANCE"]
 MaintenanceStatus = Literal["ACTIVE", "INACTIVE"]
 MaintenanceEventStatus = Literal["COMPLETED", "CANCELLED"]
+MaintenanceEventFilterStatus = Literal["SCHEDULED", "ONGOING", "COMPLETED", "CANCELLED", "READY"]
 MonitorStatus = Literal["ACTIVE", "INACTIVE"]
+MonitorDataStatus = Literal["UP", "DOWN", "DEGRADED"]
 YesNo = Literal["YES", "NO"]
 
 DEFAULT_TIMEOUT = 20.0
@@ -85,6 +87,28 @@ class KenerClient:
 
     async def delete_monitor(self, tag: str) -> dict:
         return await self._request("DELETE", f"/monitors/{tag}")
+
+    async def get_monitor_data(self, tag: str, start_ts: int, end_ts: int) -> list[dict]:
+        return (
+            await self._request(
+                "GET",
+                f"/monitors/{tag}/data",
+                params={"start_ts": start_ts, "end_ts": end_ts},
+            )
+        )["data"]
+
+    async def update_monitor_data_range(self, tag: str, body: dict[str, Any]) -> dict:
+        return await self._request("PATCH", f"/monitors/{tag}/data", json=body)
+
+    async def get_monitor_data_point(self, tag: str, timestamp: int) -> dict:
+        return (await self._request("GET", f"/monitors/{tag}/data/{timestamp}"))["data"]
+
+    async def update_monitor_data_point(
+        self, tag: str, timestamp: int, body: dict[str, Any]
+    ) -> dict:
+        return (await self._request("PATCH", f"/monitors/{tag}/data/{timestamp}", json=body))[
+            "data"
+        ]
 
     # --- Pages --------------------------------------------------------------
 
@@ -218,6 +242,11 @@ class KenerClient:
     async def delete_maintenance_event(self, maintenance_id: int, event_id: int) -> dict:
         return await self._request("DELETE", f"/maintenances/{maintenance_id}/events/{event_id}")
 
+    async def list_all_maintenance_events(
+        self, params: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        return await self._request("GET", "/maintenances/events", params=params or None)
+
     # --- Site configuration -------------------------------------------------
 
     async def get_site_data(self) -> list[dict]:
@@ -228,3 +257,8 @@ class KenerClient:
 
     async def update_site_data_key(self, key: str, value: Any) -> dict:
         return await self._request("PATCH", f"/site/{key}", json={"value": value})
+
+    # --- Images (Kener 4.1.8+) ----------------------------------------------
+
+    async def upload_image(self, body: dict[str, Any]) -> dict:
+        return (await self._request("POST", "/images", json=body))["image"]

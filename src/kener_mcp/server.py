@@ -18,6 +18,7 @@ For more than one instance, register one server per instance.
 
 import argparse
 import asyncio
+import base64
 import json
 import os
 import re
@@ -44,9 +45,11 @@ from .client import (
     IncidentState,
     KenerClient,
     KenerError,
+    MaintenanceEventFilterStatus,
     MaintenanceEventStatus,
     MaintenanceImpact,
     MaintenanceStatus,
+    MonitorDataStatus,
     MonitorStatus,
     YesNo,
 )
@@ -1650,6 +1653,226 @@ def create_server(settings: Settings, keys: ApiKeyProvider | None = None) -> Fas
             "deleted_event_id": event_id,
             "message": res.get("message"),
         }
+
+    # --- Monitor Uptime Data, Global Maintenance Events & Images ------------
+
+    @mcp.tool(annotations=READ_ONLY)
+    async def get_monitor_data(
+        tag: MonitorTag,
+        start_ts: Annotated[
+            int,
+            Field(
+                description=(
+                    "Start timestamp in UTC seconds (or exact minute timestamp if end_ts is "
+                    "omitted)."
+                ),
+                ge=1,
+            ),
+        ],
+        end_ts: Annotated[
+            int | None,
+            Field(
+                description=(
+                    "Optional end timestamp in UTC seconds (must be > start_ts). Omit to "
+                    "fetch the single data point at start_ts."
+                ),
+                ge=1,
+            ),
+        ] = None,
+    ) -> dict:
+        """Get minute-by-minute uptime and latency data points for a monitor."""
+        clean_tag = tag.strip()
+        if end_ts is not None and start_ts >= end_ts:
+            raise ToolError("start_ts must be less than end_ts.")
+        async with kener() as k:
+            if end_ts is None:
+                point = await k.get_monitor_data_point(clean_tag, start_ts)
+                return {"data": [point], "count": 1}
+            points = await k.get_monitor_data(clean_tag, start_ts, end_ts)
+        return {"data": points, "count": len(points)}
+
+    @mcp.tool(
+        annotations=DESTRUCTIVE,
+        description=(
+            "Manually override historical or current monitoring data (status and latency) for "
+            "a single minute (when end_ts is omitted) or a timestamp range (when end_ts is "
+            "provided). Marks the updated points as MANUAL. Returns before/after info. "
+            f"{BACKUP_REMINDER}"
+        ),
+    )
+    async def override_monitor_data(
+        tag: MonitorTag,
+        status: Annotated[
+            MonitorDataStatus, Field(description="Status to write ('UP', 'DOWN', or 'DEGRADED').")
+        ],
+        start_ts: Annotated[
+            int,
+            Field(
+                description="Minute timestamp (or range start) in UTC seconds.",
+                ge=1,
+            ),
+        ],
+        end_ts: Annotated[
+            int | None,
+            Field(
+                description=(
+                    "Optional range end timestamp in UTC seconds (must be > start_ts). Omit to "
+                    "override only the single minute at start_ts."
+                ),
+                ge=1,
+            ),
+        ] = None,
+        latency: Annotated[float, Field(description="Latency in milliseconds (>= 0).", ge=0)] = 0,
+        deviation: Annotated[
+            float,
+            Field(description="Latency deviation in ms for range updates (>= 0).", ge=0),
+        ] = 0,
+    ) -> dict:
+        clean_tag = tag.strip()
+        if end_ts is not None and start_ts >= end_ts:
+            raise ToolError("start_ts must be less than end_ts.")
+        async with kener() as k:
+            if end_ts is None:
+                try:
+                    before_pt = await k.get_monitor_data_point(clean_tag, start_ts)
+                except KenerError as e:
+                    if e.status_code != 404:
+                        raise
+                    before_pt = None
+                after_pt = await k.update_monitor_data_point(
+                    clean_tag, start_ts, {"status": status, "latency": latency}
+                )
+                return {"before": before_pt, "after": after_pt}
+
+            before_pts = await k.get_monitor_data(clean_tag, start_ts, end_ts)
+            res = await k.update_monitor_data_range(
+                clean_tag,
+                {
+                    "start_ts": start_ts,
+                    "end_ts": end_ts,
+                    "status": status,
+                    "latency": latency,
+                    "deviation": deviation,
+                },
+            )
+        return {
+            "before_count": len(before_pts),
+            "updated_count": res.get("updated_count"),
+            "message": res.get("message"),
+        }
+
+    @mcp.tool(annotations=READ_ONLY)
+    async def list_all_maintenance_events(
+        event_status: Annotated[
+            MaintenanceEventFilterStatus | None,
+            Field(
+                description=(
+                    "Optional status filter ('SCHEDULED', 'ONGOING', 'COMPLETED', "
+                    "'CANCELLED', 'READY')."
+                )
+            ),
+        ] = None,
+        monitor_tags: Annotated[
+            list[str] | None,
+            Field(description="Optional list of monitor tags to filter events by."),
+        ] = None,
+        maintenance_id: Annotated[
+            int | None, Field(description="Optional maintenance ID filter.", ge=1)
+        ] = None,
+        event_start_date_time: Annotated[
+            int | None,
+            Field(
+                description=(
+                    "Start timestamp in UTC seconds to filter events from (defaults on the "
+                    "server to now)."
+                ),
+                ge=1,
+            ),
+        ] = None,
+        limit: Annotated[
+            int, Field(description="Maximum events per page (1..100).", ge=1, le=100)
+        ] = 20,
+        page: Annotated[int, Field(description="Page number (>= 1).", ge=1)] = 1,
+    ) -> dict:
+        """List maintenance events across all maintenances with optional filters."""
+        params: dict[str, Any] = {"page": page, "limit": limit}
+        if event_status is not None:
+            params["event_status"] = event_status
+        if monitor_tags:
+            params["monitors"] = ",".join(t.strip() for t in monitor_tags if t.strip())
+        if maintenance_id is not None:
+            params["maintenance_id"] = maintenance_id
+        if event_start_date_time is not None:
+            params["event_start_date_time"] = event_start_date_time
+        async with kener() as k:
+            return await k.list_all_maintenance_events(params)
+
+    @mcp.tool(
+        annotations=WRITE,
+        description=(
+            "Upload an image to Kener (supported on Kener 4.1.8+) from a base64 string or a "
+            "local file path. Returns the hosted image metadata and URL, which can be passed "
+            "to create_monitor/update_monitor (image), create_page/update_page (page_logo), "
+            "or update_site_config (logo, favicon)."
+        ),
+    )
+    async def upload_image(
+        mime_type: Annotated[
+            str,
+            Field(
+                description=(
+                    "Image MIME type (e.g. 'image/png', 'image/jpeg', 'image/webp', "
+                    "'image/svg+xml')."
+                ),
+                min_length=1,
+            ),
+        ],
+        base64_data: Annotated[
+            str | None,
+            Field(description="Base64-encoded image content (provide either this or file_path)."),
+        ] = None,
+        file_path: Annotated[
+            str | None,
+            Field(description="Local file path to read and base64-encode."),
+        ] = None,
+        file_name: Annotated[
+            str | None, Field(description="Optional file name stored in Kener.")
+        ] = None,
+        max_width: Annotated[
+            int | None, Field(description="Optional max width in pixels (1..2000).", ge=1, le=2000)
+        ] = None,
+        max_height: Annotated[
+            int | None,
+            Field(description="Optional max height in pixels (1..2000).", ge=1, le=2000),
+        ] = None,
+        force_dimensions: Annotated[
+            bool | None, Field(description="Whether to force exact dimensions.")
+        ] = None,
+    ) -> dict:
+        if bool(base64_data) == bool(file_path):
+            raise ToolError("Provide exactly one of base64_data or file_path.")
+        if file_path:
+            p = Path(file_path).expanduser().resolve()
+            if not p.is_file():
+                raise ToolError(f"Image file not found: {p}")
+            encoded = base64.b64encode(p.read_bytes()).decode("ascii")
+            resolved_name = file_name or p.name
+        else:
+            encoded = (base64_data or "").strip()
+            resolved_name = file_name
+
+        body: dict[str, Any] = {"base64": encoded, "mime_type": mime_type.strip()}
+        if resolved_name is not None:
+            body["file_name"] = resolved_name
+        if max_width is not None:
+            body["max_width"] = max_width
+        if max_height is not None:
+            body["max_height"] = max_height
+        if force_dimensions is not None:
+            body["force_dimensions"] = force_dimensions
+
+        async with kener() as k:
+            return await k.upload_image(body)
 
     return mcp
 

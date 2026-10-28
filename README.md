@@ -25,6 +25,8 @@ Tested against Kener 4.1.9.
 | `create_monitor` | Creates a monitor (`cron="* * * * *"` by default) and attaches it to `page_paths` (`["~home"]` by default). | Write |
 | `update_monitor` | Updates a monitor and/or its `page_paths`. Rejects any `********` placeholder in `type_data` and returns `before`/`after` configs. | Destructive |
 | `pause_monitor` | Pauses (`status="INACTIVE"`) or resumes (`status="ACTIVE"`) a monitor and returns `before`/`after` configs. | Destructive |
+| `get_monitor_data` | Reads minute-by-minute uptime and latency data points for a monitor (single minute or timestamp range). | Read-only |
+| `override_monitor_data` | Manually overrides status (`UP`/`DOWN`/`DEGRADED`) and latency for a single minute or a timestamp range (`MANUAL`). | Destructive |
 | `delete_monitor` | Permanently deletes one monitor by exact `tag`, **including all its uptime history (`monitoring_data`)** and page/incident/maintenance/alert links. | Destructive |
 
 ### Pages
@@ -58,18 +60,20 @@ Tested against Kener 4.1.9.
 |------|--------------|------|
 | `list_maintenances` | Lists maintenances, optionally filtered by `status` or `monitor_tag`. | Read-only |
 | `get_maintenance` | Gets one maintenance definition and its scheduled/past events. | Read-only |
+| `list_all_maintenance_events` | Lists maintenance events across all maintenances, with optional status, monitor, maintenance ID, and start time filters. | Read-only |
 | `create_maintenance` | Creates a one-time (`FREQ=MINUTELY;COUNT=1`) or recurring (iCalendar `RRULE`) maintenance. | Write |
 | `update_maintenance` | Updates a maintenance definition and returns `before`/`after` configs. | Destructive |
 | `update_maintenance_event` | Updates one maintenance occurrence: either sets `status` (`COMPLETED`/`CANCELLED`) or reschedules `start_date_time` + `end_date_time`. | Destructive |
 | `delete_maintenance` | Permanently deletes one maintenance and all its events by exact `maintenance_id`. | Destructive |
 | `delete_maintenance_event` | Permanently deletes one maintenance event by exact `maintenance_id` and `event_id`. | Destructive |
 
-### Site Configuration & Categories
+### Site Configuration, Categories & Images
 
 | Tool | What it does | Mode |
 |------|--------------|------|
 | `get_site_config` | Gets all site-wide settings (`GET /site`) or a single key (`GET /site/{key}`), with secrets masked. | Read-only |
 | `update_site_config` | Updates a site configuration key (such as `title`, `siteName`, `categories`, `nav`, `hero`, `colors`, `announcement`), returning `before`/`after` configs. | Destructive |
+| `upload_image` | Uploads an image (`POST /images`, Kener 4.1.8+) from a base64 string or local file path and returns its hosted URL. | Write |
 
 Every tool carries explicit MCP annotations:
 - **Read-only**: `readOnlyHint=true`, `destructiveHint=false`
