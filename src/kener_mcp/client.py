@@ -1,4 +1,4 @@
-"""Thin async client for the Kener v4 REST API (tested against Kener 4.1.7)."""
+"""Thin async client for the Kener v4 REST API (tested against Kener 4.1.9)."""
 
 from typing import Any, Literal
 
@@ -7,7 +7,12 @@ import httpx
 from . import __version__
 
 IncidentState = Literal["INVESTIGATING", "IDENTIFIED", "MONITORING", "RESOLVED"]
-Impact = Literal["DOWN", "DEGRADED"]
+Impact = Literal["DOWN", "DEGRADED", "MAINTENANCE"]
+MaintenanceImpact = Literal["UP", "DOWN", "DEGRADED", "MAINTENANCE"]
+MaintenanceStatus = Literal["ACTIVE", "INACTIVE"]
+MaintenanceEventStatus = Literal["COMPLETED", "CANCELLED"]
+MonitorStatus = Literal["ACTIVE", "INACTIVE"]
+YesNo = Literal["YES", "NO"]
 
 DEFAULT_TIMEOUT = 20.0
 
@@ -64,8 +69,41 @@ class KenerClient:
             pass
         raise KenerError(f"Kener returned {resp.status_code}: {message}", resp.status_code)
 
+    # --- Monitors -----------------------------------------------------------
+
     async def list_monitors(self) -> list[dict]:
         return (await self._request("GET", "/monitors"))["monitors"]
+
+    async def get_monitor(self, tag: str) -> dict:
+        return (await self._request("GET", f"/monitors/{tag}"))["monitor"]
+
+    async def create_monitor(self, body: dict[str, Any]) -> dict:
+        return (await self._request("POST", "/monitors", json=body))["monitor"]
+
+    async def update_monitor(self, tag: str, body: dict[str, Any]) -> dict:
+        return (await self._request("PATCH", f"/monitors/{tag}", json=body))["monitor"]
+
+    async def delete_monitor(self, tag: str) -> dict:
+        return await self._request("DELETE", f"/monitors/{tag}")
+
+    # --- Pages --------------------------------------------------------------
+
+    async def list_pages(self) -> list[dict]:
+        return (await self._request("GET", "/pages"))["pages"]
+
+    async def get_page(self, page_path: str) -> dict:
+        return (await self._request("GET", f"/pages/{page_path}"))["page"]
+
+    async def create_page(self, body: dict[str, Any]) -> dict:
+        return (await self._request("POST", "/pages", json=body))["page"]
+
+    async def update_page(self, page_path: str, body: dict[str, Any]) -> dict:
+        return (await self._request("PATCH", f"/pages/{page_path}", json=body))["page"]
+
+    async def delete_page(self, page_path: str) -> dict:
+        return await self._request("DELETE", f"/pages/{page_path}")
+
+    # --- Incidents ----------------------------------------------------------
 
     async def list_incidents(self) -> list[dict]:
         return (await self._request("GET", "/incidents"))["incidents"]
@@ -76,6 +114,11 @@ class KenerClient:
     async def list_comments(self, incident_id: int) -> list[dict]:
         return (await self._request("GET", f"/incidents/{incident_id}/comments"))["comments"]
 
+    async def get_comment(self, incident_id: int, comment_id: int) -> dict:
+        return (await self._request("GET", f"/incidents/{incident_id}/comments/{comment_id}"))[
+            "comment"
+        ]
+
     async def add_comment(
         self,
         incident_id: int,
@@ -83,7 +126,7 @@ class KenerClient:
         state: IncidentState,
         timestamp: int | None = None,
     ) -> dict:
-        # Kener 4.1.7 reads "comment" and "state". Its docs show "message"/"status",
+        # Kener reads "comment" and "state". Its docs show "message"/"status",
         # which the server rejects.
         body: dict[str, Any] = {"comment": comment, "state": state}
         if timestamp is not None:
@@ -91,6 +134,16 @@ class KenerClient:
         return (await self._request("POST", f"/incidents/{incident_id}/comments", json=body))[
             "comment"
         ]
+
+    async def update_comment(self, incident_id: int, comment_id: int, body: dict[str, Any]) -> dict:
+        return (
+            await self._request(
+                "PATCH", f"/incidents/{incident_id}/comments/{comment_id}", json=body
+            )
+        )["comment"]
+
+    async def delete_comment(self, incident_id: int, comment_id: int) -> dict:
+        return await self._request("DELETE", f"/incidents/{incident_id}/comments/{comment_id}")
 
     async def create_incident(
         self,
@@ -103,5 +156,75 @@ class KenerClient:
             body["monitors"] = monitors
         return (await self._request("POST", "/incidents", json=body))["incident"]
 
+    async def update_incident(self, incident_id: int, body: dict[str, Any]) -> dict:
+        return (await self._request("PATCH", f"/incidents/{incident_id}", json=body))["incident"]
+
     async def delete_incident(self, incident_id: int) -> dict:
         return await self._request("DELETE", f"/incidents/{incident_id}")
+
+    # --- Maintenances -------------------------------------------------------
+
+    async def list_maintenances(
+        self,
+        status: MaintenanceStatus | None = None,
+        monitor_tag: str | None = None,
+    ) -> list[dict]:
+        params: dict[str, str] = {}
+        if status:
+            params["status"] = status
+        if monitor_tag:
+            params["monitor_tag"] = monitor_tag
+        return (await self._request("GET", "/maintenances", params=params or None))["maintenances"]
+
+    async def get_maintenance(self, maintenance_id: int) -> dict:
+        return (await self._request("GET", f"/maintenances/{maintenance_id}"))["maintenance"]
+
+    async def create_maintenance(self, body: dict[str, Any]) -> dict:
+        return (await self._request("POST", "/maintenances", json=body))["maintenance"]
+
+    async def update_maintenance(self, maintenance_id: int, body: dict[str, Any]) -> dict:
+        return (await self._request("PATCH", f"/maintenances/{maintenance_id}", json=body))[
+            "maintenance"
+        ]
+
+    async def delete_maintenance(self, maintenance_id: int) -> dict:
+        return await self._request("DELETE", f"/maintenances/{maintenance_id}")
+
+    async def list_maintenance_events(
+        self, maintenance_id: int, page: int = 1, limit: int = 100
+    ) -> list[dict]:
+        return (
+            await self._request(
+                "GET",
+                f"/maintenances/{maintenance_id}/events",
+                params={"page": page, "limit": limit},
+            )
+        )["events"]
+
+    async def get_maintenance_event(self, maintenance_id: int, event_id: int) -> dict:
+        return (await self._request("GET", f"/maintenances/{maintenance_id}/events/{event_id}"))[
+            "event"
+        ]
+
+    async def update_maintenance_event(
+        self, maintenance_id: int, event_id: int, body: dict[str, Any]
+    ) -> dict:
+        return (
+            await self._request(
+                "PATCH", f"/maintenances/{maintenance_id}/events/{event_id}", json=body
+            )
+        )["event"]
+
+    async def delete_maintenance_event(self, maintenance_id: int, event_id: int) -> dict:
+        return await self._request("DELETE", f"/maintenances/{maintenance_id}/events/{event_id}")
+
+    # --- Site configuration -------------------------------------------------
+
+    async def get_site_data(self) -> list[dict]:
+        return (await self._request("GET", "/site"))["site_data"]
+
+    async def get_site_data_key(self, key: str) -> dict:
+        return await self._request("GET", f"/site/{key}")
+
+    async def update_site_data_key(self, key: str, value: Any) -> dict:
+        return await self._request("PATCH", f"/site/{key}", json={"value": value})
